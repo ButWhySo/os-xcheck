@@ -1,0 +1,45 @@
+# Project tasks
+
+## Milestone 1 - Environment and xv6 setup
+
+- [x] **1.1** Verify Ubuntu, GCC, Make, and Git.
+- [x] **1.2** Pin xv6 source and confirm its on-disk structures.
+- [x] **1.3** Build `mkfs` and create a clean image.
+- [x] **1.4** Parse the image header and implement the required command-line errors.
+- [x] **1.5** Run milestone checks and commit the working setup.
+
+## Milestone 2 - Inode and root checks
+
+- [ ] **2.1** Reject inode types outside the xv6 type values.
+- [ ] **2.2** Validate direct and indirect block addresses.
+- [ ] **2.3** Check that root inode 1 exists and names itself as parent.
+- [ ] **2.4** Test each diagnostic and commit the checks.
+
+## Milestone 3 - Block allocation checks
+
+- [ ] **3.1** Check inode block references against the allocation bitmap.
+- [ ] **3.2** Find allocated data blocks unused by any inode.
+- [ ] **3.3** Detect repeated direct and indirect block references.
+- [ ] **3.4** Test bitmap and duplicate-address errors; commit the checks.
+
+## Milestone 4 - Directory and reference checks
+
+- [ ] **4.1** Validate `.` and `..` entries in every directory.
+- [ ] **4.2** Check allocated and referenced inode consistency.
+- [ ] **4.3** Compare regular-file link counts with directory references.
+- [ ] **4.4** Reject directories linked from multiple parents.
+- [ ] **4.5** Test each diagnostic and commit the checks.
+
+## Milestone 5 - Complete test coverage and documentation
+
+- [ ] **5.1** Cover all required diagnostics and command-line cases.
+- [ ] **5.2** Check a clean image produced by the pinned xv6 `mkfs`.
+- [ ] **5.3** Record build, test, and compatibility instructions.
+- [ ] **5.4** Run the complete suite and commit the verified project.
+
+## Milestone 6 - Final review
+
+- [ ] **6.1** Review the checker for correctness and student-level clarity.
+- [ ] **6.2** Remove unused code and fix any review findings.
+- [ ] **6.3** Run the complete suite after the review.
+- [ ] **6.4** Commit the final reviewed state.
