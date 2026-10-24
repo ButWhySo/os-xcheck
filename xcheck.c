@@ -183,8 +183,7 @@ static const uint8_t *directory_entry(const struct image *image,
                                       const struct inode *directory,
                                       uint32_t offset)
 {
-    if (offset >= directory->size || directory->size % DIRECTORY_ENTRY_SIZE != 0
-        || directory->size > MAX_FILE_BLOCKS * BLOCK_SIZE)
+    if (offset >= directory->size || directory->size > MAX_FILE_BLOCKS * BLOCK_SIZE)
         return NULL;
 
     uint32_t block = file_block(image, directory, offset / BLOCK_SIZE);
@@ -196,12 +195,14 @@ static const uint8_t *directory_entry(const struct image *image,
 static int check_root(const struct image *image)
 {
     struct inode root = read_inode(image, 1);
-    if (root.type != TYPE_DIRECTORY || root.size % DIRECTORY_ENTRY_SIZE != 0) {
+    if (root.type != TYPE_DIRECTORY) {
         fprintf(stderr, "%s\n", ROOT_MISSING);
         return -1;
     }
 
-    for (uint32_t offset = 0; offset < root.size; offset += DIRECTORY_ENTRY_SIZE) {
+    for (uint32_t offset = 0;
+         offset + DIRECTORY_ENTRY_SIZE <= root.size;
+         offset += DIRECTORY_ENTRY_SIZE) {
         const uint8_t *entry = directory_entry(image, &root, offset);
         if (entry == NULL) {
             fprintf(stderr, "%s\n", ROOT_MISSING);
@@ -260,6 +261,12 @@ static int init_block_state(const struct image *image, struct block_state *state
     state->direct_refs = calloc(image->sb.size, sizeof(*state->direct_refs));
     state->indirect_refs = calloc(image->sb.size, sizeof(*state->indirect_refs));
     if (state->used == NULL || state->direct_refs == NULL || state->indirect_refs == NULL) {
+        free(state->used);
+        free(state->direct_refs);
+        free(state->indirect_refs);
+        state->used = NULL;
+        state->direct_refs = NULL;
+        state->indirect_refs = NULL;
         fprintf(stderr, "xcheck: out of memory\n");
         return -1;
     }
@@ -306,6 +313,7 @@ static void collect_block_references(const struct image *image,
         uint32_t indirect = inode.addresses[DIRECT_COUNT];
         if (indirect == 0)
             continue;
+        /* The indirect block itself also occupies an allocated data block. */
         add_block_reference(state, indirect, 0);
 
         const uint8_t *entries = image->data + (size_t)indirect * BLOCK_SIZE;
@@ -389,6 +397,10 @@ static int init_directory_state(const struct image *image,
     state->inode_refs = calloc(image->sb.inode_count, sizeof(*state->inode_refs));
     state->directory_refs = calloc(image->sb.inode_count, sizeof(*state->directory_refs));
     if (state->inode_refs == NULL || state->directory_refs == NULL) {
+        free(state->inode_refs);
+        free(state->directory_refs);
+        state->inode_refs = NULL;
+        state->directory_refs = NULL;
         fprintf(stderr, "xcheck: out of memory\n");
         return -1;
     }
@@ -416,6 +428,7 @@ static void collect_directory_references(const struct image *image,
             if (target == 0 || target >= image->sb.inode_count)
                 continue;
             state->inode_refs[target]++;
+            /* Dot entries describe the directory itself and its parent. */
             if (!name_is(entry, ".") && !name_is(entry, "..")
                 && read_inode(image, target).type == TYPE_DIRECTORY)
                 state->directory_refs[target]++;
@@ -587,8 +600,14 @@ int main(int argc, char **argv)
     collect_block_references(&image, &blocks);
     if (check_bitmap_for_references(&image) < 0
         || check_bitmap_for_unused_blocks(&image, &blocks) < 0
-        || check_duplicate_blocks(&image, &blocks) < 0
-        || init_directory_state(&image, &directories) < 0) {
+        || check_duplicate_blocks(&image, &blocks) < 0) {
+        free_block_state(&blocks);
+        close_image(&image);
+        return 1;
+    }
+
+    if (init_directory_state(&image, &directories) < 0) {
+        free_directory_state(&directories);
         free_block_state(&blocks);
         close_image(&image);
         return 1;

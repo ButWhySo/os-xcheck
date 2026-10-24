@@ -39,7 +39,7 @@
 
 ## Milestone 6 - Final review
 
-- [ ] **6.1** Review the checker for correctness and student-level clarity.
-- [ ] **6.2** Remove unused code and fix any review findings.
-- [ ] **6.3** Run the complete suite after the review.
-- [ ] **6.4** Commit the final reviewed state.
+- [x] **6.1** Review the checker for correctness and student-level clarity.
+- [x] **6.2** Remove unused code and fix any review findings.
+- [x] **6.3** Run the complete suite after the review.
+- [x] **6.4** Commit the final reviewed state.

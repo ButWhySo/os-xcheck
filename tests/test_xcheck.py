@@ -18,6 +18,7 @@ ROOT_INODE_OFFSET = INODE_START * BLOCK_SIZE + 64
 
 def make_clean_image(path):
     image = bytearray(IMAGE_BYTES)
+    # Layout and offsets match the pinned xv6-public mkfs format.
     struct.pack_into(
         "<7I", image, BLOCK_SIZE,
         IMAGE_BLOCKS, IMAGE_BLOCKS - DATA_START, INODE_COUNT, 30, 2,
@@ -31,7 +32,8 @@ def make_clean_image(path):
     directory_offset = ROOT_DATA_BLOCK * BLOCK_SIZE
     for entry, name in enumerate((b".", b"..")):
         struct.pack_into("<H", image, directory_offset + entry * 16, 1)
-        image[directory_offset + entry * 16 + 2:directory_offset + entry * 16 + 2 + len(name)] = name
+        name_offset = directory_offset + entry * 16 + 2
+        image[name_offset:name_offset + len(name)] = name
 
     for block in range(ROOT_DATA_BLOCK + 1):
         image[BITMAP_START * BLOCK_SIZE + block // 8] |= 1 << (block % 8)
@@ -139,11 +141,14 @@ class XcheckTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, message + "\n")
 
-    def test_clean_image_is_silent(self):
-        result = self.run_xcheck(self.image_path)
+    def assert_clean(self, path):
+        result = self.run_xcheck(path)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+    def test_clean_image_is_silent(self):
+        self.assert_clean(self.image_path)
 
     def test_missing_argument(self):
         result = self.run_xcheck()
@@ -202,7 +207,9 @@ class XcheckTests(unittest.TestCase):
     def test_bad_indirect_block_address(self):
         path = self.edited_image(
             "bad-indirect-block.img",
-            lambda image: struct.pack_into("<I", image, ROOT_INODE_OFFSET + 12 + 12 * 4, IMAGE_BLOCKS),
+            lambda image: struct.pack_into(
+                "<I", image, ROOT_INODE_OFFSET + 12 + 12 * 4, IMAGE_BLOCKS
+            ),
         )
         self.assert_error(path, "ERROR: bad indirect address in inode.")
 
@@ -273,6 +280,13 @@ class XcheckTests(unittest.TestCase):
         path = self.edited_image("duplicate-direct.img", edit)
         self.assert_error(path, "ERROR: direct address used more than once.")
 
+    def test_direct_address_cannot_repeat_within_inode(self):
+        path = self.edited_image(
+            "duplicate-direct-slot.img",
+            lambda image: set_inode_address(image, 1, 1, ROOT_DATA_BLOCK),
+        )
+        self.assert_error(path, "ERROR: direct address used more than once.")
+
     def test_indirect_addresses_cannot_repeat(self):
         def edit(image):
             set_inode_type(image, 2, 2)
@@ -313,6 +327,12 @@ class XcheckTests(unittest.TestCase):
         )
         self.assert_error(path, "ERROR: directory not properly formatted.")
 
+    def test_directory_size_must_fit_whole_entries(self):
+        path = self.edited_image(
+            "partial-dirent.img", lambda image: set_inode_size(image, 1, 33)
+        )
+        self.assert_error(path, "ERROR: directory not properly formatted.")
+
     def test_dot_must_point_to_its_directory(self):
         path = self.edited_image(
             "wrong-dot-target.img", lambda image: write_dirent(image, ROOT_DATA_BLOCK, 0, 2, b".")
@@ -333,7 +353,9 @@ class XcheckTests(unittest.TestCase):
         self.assert_error(path, "ERROR: directory not properly formatted.")
 
     def test_allocated_inode_must_be_referenced(self):
-        path = self.edited_image("unreferenced-inode.img", lambda image: set_inode_type(image, 2, 2))
+        path = self.edited_image(
+            "unreferenced-inode.img", lambda image: set_inode_type(image, 2, 2)
+        )
         self.assert_error(path, "ERROR: inode marked use but not found in a directory.")
 
     def test_directory_cannot_reference_free_inode(self):
@@ -373,10 +395,7 @@ class XcheckTests(unittest.TestCase):
             set_inode_size(image, 1, 64)
 
         path = self.edited_image("valid-entries.img", edit)
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
     def test_file_with_matching_hard_links_passes(self):
         def edit(image):
@@ -385,10 +404,7 @@ class XcheckTests(unittest.TestCase):
             set_inode_size(image, 1, 64)
 
         path = self.edited_image("valid-hard-links.img", edit)
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
     def test_device_inode_is_a_valid_type(self):
         def edit(image):
@@ -397,17 +413,11 @@ class XcheckTests(unittest.TestCase):
             set_inode_size(image, 1, 48)
 
         path = self.edited_image("valid-device.img", edit)
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
     def test_file_with_indirect_blocks_passes(self):
         path = self.edited_image("valid-indirect-file.img", add_indirect_file)
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
     def test_directory_with_indirect_blocks_passes(self):
         def edit(image):
@@ -424,19 +434,13 @@ class XcheckTests(unittest.TestCase):
             write_dirent(image, 60, 1, 1, b"..")
 
         path = self.edited_image("valid-indirect-directory.img", edit)
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
     def test_image_from_pinned_xv6_mkfs_passes(self):
         path = os.environ.get("XV6_FS_IMAGE")
         if not path:
             self.skipTest("set XV6_FS_IMAGE to test an xv6 mkfs image")
-        result = self.run_xcheck(path)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assert_clean(path)
 
 
 if __name__ == "__main__":
