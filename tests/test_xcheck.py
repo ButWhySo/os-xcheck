@@ -13,6 +13,7 @@ INODE_START = 32
 BITMAP_START = 58
 DATA_START = 59
 ROOT_DATA_BLOCK = 60
+ROOT_INODE_OFFSET = INODE_START * BLOCK_SIZE + 64
 
 
 def make_clean_image(path):
@@ -53,6 +54,21 @@ class XcheckTests(unittest.TestCase):
             ["./xcheck", *args], capture_output=True, text=True, check=False
         )
 
+    def edited_image(self, name, edit):
+        with open(self.image_path, "rb") as source:
+            image = bytearray(source.read())
+        edit(image)
+        path = os.path.join(self.temp_dir.name, name)
+        with open(path, "wb") as output:
+            output.write(image)
+        return path
+
+    def assert_error(self, path, message):
+        result = self.run_xcheck(path)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, message + "\n")
+
     def test_clean_image_is_silent(self):
         result = self.run_xcheck(self.image_path)
         self.assertEqual(result.returncode, 0)
@@ -73,9 +89,55 @@ class XcheckTests(unittest.TestCase):
         bad_path = os.path.join(self.temp_dir.name, "invalid.img")
         with open(bad_path, "wb") as output:
             output.write(b"not an xv6 image")
-        result = self.run_xcheck(bad_path)
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr, "ERROR: invalid file system image.\n")
+        self.assert_error(bad_path, "ERROR: invalid file system image.")
+
+    def test_bad_inode_type(self):
+        path = self.edited_image(
+            "bad-inode.img", lambda image: struct.pack_into("<H", image, ROOT_INODE_OFFSET, 4)
+        )
+        self.assert_error(path, "ERROR: bad inode.")
+
+    def test_bad_direct_address(self):
+        path = self.edited_image(
+            "bad-direct.img",
+            lambda image: struct.pack_into("<I", image, ROOT_INODE_OFFSET + 12, IMAGE_BLOCKS),
+        )
+        self.assert_error(path, "ERROR: bad direct address in inode.")
+
+    def test_direct_address_to_metadata_is_invalid(self):
+        path = self.edited_image(
+            "metadata-direct.img",
+            lambda image: struct.pack_into("<I", image, ROOT_INODE_OFFSET + 12, BITMAP_START),
+        )
+        self.assert_error(path, "ERROR: bad direct address in inode.")
+
+    def test_bad_indirect_block_address(self):
+        path = self.edited_image(
+            "bad-indirect-block.img",
+            lambda image: struct.pack_into("<I", image, ROOT_INODE_OFFSET + 12 + 12 * 4, IMAGE_BLOCKS),
+        )
+        self.assert_error(path, "ERROR: bad indirect address in inode.")
+
+    def test_bad_address_in_indirect_block(self):
+        def edit(image):
+            struct.pack_into("<I", image, ROOT_INODE_OFFSET + 12 + 12 * 4, 61)
+            struct.pack_into("<I", image, 61 * BLOCK_SIZE, IMAGE_BLOCKS)
+
+        path = self.edited_image("bad-indirect-data.img", edit)
+        self.assert_error(path, "ERROR: bad indirect address in inode.")
+
+    def test_missing_root_inode(self):
+        path = self.edited_image(
+            "missing-root.img", lambda image: struct.pack_into("<H", image, ROOT_INODE_OFFSET, 0)
+        )
+        self.assert_error(path, "ERROR: root directory does not exist.")
+
+    def test_root_parent_must_be_root(self):
+        path = self.edited_image(
+            "bad-root-parent.img",
+            lambda image: struct.pack_into("<H", image, ROOT_DATA_BLOCK * BLOCK_SIZE + 16, 2),
+        )
+        self.assert_error(path, "ERROR: root directory does not exist.")
 
 
 if __name__ == "__main__":

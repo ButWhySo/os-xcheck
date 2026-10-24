@@ -10,10 +10,10 @@
 
 ## Milestone 2 - Inode and root checks
 
-- [ ] **2.1** Reject inode types outside the xv6 type values.
-- [ ] **2.2** Validate direct and indirect block addresses.
-- [ ] **2.3** Check that root inode 1 exists and names itself as parent.
-- [ ] **2.4** Test each diagnostic and commit the checks.
+- [x] **2.1** Reject inode types outside the xv6 type values.
+- [x] **2.2** Validate direct and indirect block addresses.
+- [x] **2.3** Check that root inode 1 exists and names itself as parent.
+- [x] **2.4** Test each diagnostic and commit the checks.
 
 ## Milestone 3 - Block allocation checks
 

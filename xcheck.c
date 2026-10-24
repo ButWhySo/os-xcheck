@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -17,8 +18,15 @@
 #define INDIRECT_COUNT (BLOCK_SIZE / sizeof(uint32_t))
 #define MAX_FILE_BLOCKS (DIRECT_COUNT + INDIRECT_COUNT)
 #define SUPERBLOCK_OFFSET BLOCK_SIZE
+#define TYPE_DIRECTORY 1
+#define TYPE_FILE 2
+#define TYPE_DEVICE 3
 
 #define INVALID_IMAGE "ERROR: invalid file system image."
+#define BAD_INODE "ERROR: bad inode."
+#define BAD_DIRECT_ADDRESS "ERROR: bad direct address in inode."
+#define BAD_INDIRECT_ADDRESS "ERROR: bad indirect address in inode."
+#define ROOT_MISSING "ERROR: root directory does not exist."
 
 struct superblock {
     uint32_t size;
@@ -38,12 +46,152 @@ struct image {
     uint32_t data_start;
 };
 
+struct inode {
+    uint16_t type;
+    uint16_t links;
+    uint32_t size;
+    uint32_t addresses[DIRECT_COUNT + 1];
+};
+
+static uint16_t read_u16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | (uint16_t)p[1] << 8;
+}
+
 static uint32_t read_u32(const uint8_t *p)
 {
     return (uint32_t)p[0]
         | (uint32_t)p[1] << 8
         | (uint32_t)p[2] << 16
         | (uint32_t)p[3] << 24;
+}
+
+static struct inode read_inode(const struct image *image, uint32_t number)
+{
+    struct inode inode;
+    size_t offset = (size_t)image->sb.inode_start * BLOCK_SIZE
+        + (size_t)number * INODE_SIZE;
+    const uint8_t *bytes = image->data + offset;
+
+    inode.type = read_u16(bytes);
+    inode.links = read_u16(bytes + 6);
+    inode.size = read_u32(bytes + 8);
+    for (size_t i = 0; i < DIRECT_COUNT + 1; i++)
+        inode.addresses[i] = read_u32(bytes + 12 + i * sizeof(uint32_t));
+    return inode;
+}
+
+static int valid_data_block(const struct image *image, uint32_t block)
+{
+    return block >= image->data_start && block < image->sb.size;
+}
+
+static int check_inode_types(const struct image *image)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        uint16_t type = read_inode(image, number).type;
+        if (type != 0 && type != TYPE_DIRECTORY && type != TYPE_FILE
+            && type != TYPE_DEVICE) {
+            fprintf(stderr, "%s\n", BAD_INODE);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int check_inode_addresses(const struct image *image)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode inode = read_inode(image, number);
+        if (inode.type == 0)
+            continue;
+
+        for (size_t i = 0; i < DIRECT_COUNT; i++) {
+            if (inode.addresses[i] != 0
+                && !valid_data_block(image, inode.addresses[i])) {
+                fprintf(stderr, "%s\n", BAD_DIRECT_ADDRESS);
+                return -1;
+            }
+        }
+
+        uint32_t indirect = inode.addresses[DIRECT_COUNT];
+        if (indirect == 0)
+            continue;
+        if (!valid_data_block(image, indirect)) {
+            fprintf(stderr, "%s\n", BAD_INDIRECT_ADDRESS);
+            return -1;
+        }
+
+        const uint8_t *entries = image->data + (size_t)indirect * BLOCK_SIZE;
+        for (size_t i = 0; i < INDIRECT_COUNT; i++) {
+            uint32_t block = read_u32(entries + i * sizeof(uint32_t));
+            if (block != 0 && !valid_data_block(image, block)) {
+                fprintf(stderr, "%s\n", BAD_INDIRECT_ADDRESS);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static uint32_t file_block(const struct image *image, const struct inode *inode,
+                           uint32_t index)
+{
+    if (index >= MAX_FILE_BLOCKS)
+        return 0;
+    if (index < DIRECT_COUNT)
+        return inode->addresses[index];
+
+    uint32_t indirect = inode->addresses[DIRECT_COUNT];
+    if (indirect == 0)
+        return 0;
+    const uint8_t *entries = image->data + (size_t)indirect * BLOCK_SIZE;
+    return read_u32(entries + (index - DIRECT_COUNT) * sizeof(uint32_t));
+}
+
+static int name_is(const uint8_t *entry, const char *name)
+{
+    size_t length = 0;
+    while (name[length] != '\0')
+        length++;
+    return length < 14 && entry[2 + length] == '\0'
+        && memcmp(entry + 2, name, length) == 0;
+}
+
+static const uint8_t *directory_entry(const struct image *image,
+                                      const struct inode *directory,
+                                      uint32_t offset)
+{
+    if (offset >= directory->size || directory->size % DIRECTORY_ENTRY_SIZE != 0
+        || directory->size > MAX_FILE_BLOCKS * BLOCK_SIZE)
+        return NULL;
+
+    uint32_t block = file_block(image, directory, offset / BLOCK_SIZE);
+    if (block == 0)
+        return NULL;
+    return image->data + (size_t)block * BLOCK_SIZE + offset % BLOCK_SIZE;
+}
+
+static int check_root(const struct image *image)
+{
+    struct inode root = read_inode(image, 1);
+    if (root.type != TYPE_DIRECTORY || root.size % DIRECTORY_ENTRY_SIZE != 0) {
+        fprintf(stderr, "%s\n", ROOT_MISSING);
+        return -1;
+    }
+
+    for (uint32_t offset = 0; offset < root.size; offset += DIRECTORY_ENTRY_SIZE) {
+        const uint8_t *entry = directory_entry(image, &root, offset);
+        if (entry == NULL) {
+            fprintf(stderr, "%s\n", ROOT_MISSING);
+            return -1;
+        }
+        if (read_u16(entry) == 1 && name_is(entry, ".."))
+            return 0;
+    }
+
+    fprintf(stderr, "%s\n", ROOT_MISSING);
+    return -1;
 }
 
 static int load_image(struct image *image, const char *path)
@@ -121,7 +269,6 @@ static void close_image(struct image *image)
 int main(int argc, char **argv)
 {
     struct image image = { .fd = -1, .data = NULL, .length = 0 };
-    int result;
 
     if (argc != 2) {
         fprintf(stderr, "Usage: xcheck <file_system_image>\n");
@@ -133,7 +280,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    result = 0;
+    if (check_inode_types(&image) < 0
+        || check_inode_addresses(&image) < 0
+        || check_root(&image) < 0) {
+        close_image(&image);
+        return 1;
+    }
+
     close_image(&image);
-    return result;
+    return 0;
 }
