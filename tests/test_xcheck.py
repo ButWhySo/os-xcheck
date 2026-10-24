@@ -12,7 +12,7 @@ INODE_COUNT = 200
 INODE_START = 32
 BITMAP_START = 58
 DATA_START = 59
-ROOT_DATA_BLOCK = 60
+ROOT_DATA_BLOCK = DATA_START
 ROOT_INODE_OFFSET = INODE_START * BLOCK_SIZE + 64
 
 
@@ -38,6 +38,27 @@ def make_clean_image(path):
 
     with open(path, "wb") as output:
         output.write(image)
+
+
+def inode_offset(number):
+    return INODE_START * BLOCK_SIZE + number * 64
+
+
+def set_inode_type(image, number, inode_type):
+    struct.pack_into("<H", image, inode_offset(number), inode_type)
+
+
+def set_inode_address(image, number, slot, block):
+    struct.pack_into("<I", image, inode_offset(number) + 12 + slot * 4, block)
+
+
+def set_bitmap(image, block, allocated):
+    offset = BITMAP_START * BLOCK_SIZE + block // 8
+    mask = 1 << (block % 8)
+    if allocated:
+        image[offset] |= mask
+    else:
+        image[offset] &= ~mask
 
 
 class XcheckTests(unittest.TestCase):
@@ -138,6 +159,78 @@ class XcheckTests(unittest.TestCase):
             lambda image: struct.pack_into("<H", image, ROOT_DATA_BLOCK * BLOCK_SIZE + 16, 2),
         )
         self.assert_error(path, "ERROR: root directory does not exist.")
+
+    def test_inode_address_must_be_allocated(self):
+        path = self.edited_image(
+            "free-data-block.img", lambda image: set_bitmap(image, ROOT_DATA_BLOCK, False)
+        )
+        self.assert_error(path, "ERROR: address used by inode but marked free in bitmap.")
+
+    def test_indirect_block_must_be_allocated(self):
+        def edit(image):
+            set_inode_type(image, 2, 2)
+            set_inode_address(image, 2, 12, 61)
+
+        path = self.edited_image("free-indirect-block.img", edit)
+        self.assert_error(path, "ERROR: address used by inode but marked free in bitmap.")
+
+    def test_indirect_data_block_must_be_allocated(self):
+        def edit(image):
+            set_inode_type(image, 2, 2)
+            set_inode_address(image, 2, 12, 61)
+            struct.pack_into("<I", image, 61 * BLOCK_SIZE, 62)
+            set_bitmap(image, 61, True)
+
+        path = self.edited_image("free-indirect-data.img", edit)
+        self.assert_error(path, "ERROR: address used by inode but marked free in bitmap.")
+
+    def test_allocated_data_block_must_be_used(self):
+        path = self.edited_image(
+            "unused-allocated-block.img", lambda image: set_bitmap(image, ROOT_DATA_BLOCK + 1, True)
+        )
+        self.assert_error(path, "ERROR: bitmap marks block in use but it is not in use.")
+
+    def test_direct_address_cannot_repeat(self):
+        def edit(image):
+            set_inode_type(image, 2, 2)
+            set_inode_address(image, 2, 0, ROOT_DATA_BLOCK)
+
+        path = self.edited_image("duplicate-direct.img", edit)
+        self.assert_error(path, "ERROR: direct address used more than once.")
+
+    def test_indirect_addresses_cannot_repeat(self):
+        def edit(image):
+            set_inode_type(image, 2, 2)
+            set_inode_address(image, 2, 12, 61)
+            set_inode_type(image, 3, 2)
+            set_inode_address(image, 3, 12, 63)
+            struct.pack_into("<I", image, 61 * BLOCK_SIZE, 62)
+            struct.pack_into("<I", image, 63 * BLOCK_SIZE, 62)
+            for block in (61, 62, 63):
+                set_bitmap(image, block, True)
+
+        path = self.edited_image("duplicate-indirect-data.img", edit)
+        self.assert_error(path, "ERROR: indirect address used more than once.")
+
+    def test_indirect_block_cannot_repeat(self):
+        def edit(image):
+            for number in (2, 3):
+                set_inode_type(image, number, 2)
+                set_inode_address(image, number, 12, 61)
+            set_bitmap(image, 61, True)
+
+        path = self.edited_image("duplicate-indirect-block.img", edit)
+        self.assert_error(path, "ERROR: indirect address used more than once.")
+
+    def test_direct_and_indirect_addresses_cannot_alias(self):
+        def edit(image):
+            set_inode_type(image, 2, 2)
+            set_inode_address(image, 2, 12, 61)
+            struct.pack_into("<I", image, 61 * BLOCK_SIZE, ROOT_DATA_BLOCK)
+            set_bitmap(image, 61, True)
+
+        path = self.edited_image("duplicate-mixed-address.img", edit)
+        self.assert_error(path, "ERROR: direct address used more than once.")
 
 
 if __name__ == "__main__":

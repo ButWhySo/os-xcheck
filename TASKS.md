@@ -17,10 +17,10 @@
 
 ## Milestone 3 - Block allocation checks
 
-- [ ] **3.1** Check inode block references against the allocation bitmap.
-- [ ] **3.2** Find allocated data blocks unused by any inode.
-- [ ] **3.3** Detect repeated direct and indirect block references.
-- [ ] **3.4** Test bitmap and duplicate-address errors; commit the checks.
+- [x] **3.1** Check inode block references against the allocation bitmap.
+- [x] **3.2** Find allocated data blocks unused by any inode.
+- [x] **3.3** Detect repeated direct and indirect block references.
+- [x] **3.4** Test bitmap and duplicate-address errors; commit the checks.
 
 ## Milestone 4 - Directory and reference checks
 

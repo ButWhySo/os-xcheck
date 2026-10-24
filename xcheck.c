@@ -46,6 +46,12 @@ struct image {
     uint32_t data_start;
 };
 
+struct block_state {
+    uint8_t *used;
+    uint8_t *direct_refs;
+    uint8_t *indirect_refs;
+};
+
 struct inode {
     uint16_t type;
     uint16_t links;
@@ -194,6 +200,136 @@ static int check_root(const struct image *image)
     return -1;
 }
 
+static int init_block_state(const struct image *image, struct block_state *state)
+{
+    state->used = calloc(image->sb.size, sizeof(*state->used));
+    state->direct_refs = calloc(image->sb.size, sizeof(*state->direct_refs));
+    state->indirect_refs = calloc(image->sb.size, sizeof(*state->indirect_refs));
+    if (state->used == NULL || state->direct_refs == NULL || state->indirect_refs == NULL) {
+        fprintf(stderr, "xcheck: out of memory\n");
+        return -1;
+    }
+    return 0;
+}
+
+static void free_block_state(struct block_state *state)
+{
+    free(state->used);
+    free(state->direct_refs);
+    free(state->indirect_refs);
+}
+
+static int bitmap_is_set(const struct image *image, uint32_t block)
+{
+    size_t offset = (size_t)image->sb.bitmap_start * BLOCK_SIZE + block / 8;
+    return (image->data[offset] & (1U << (block % 8))) != 0;
+}
+
+static void add_block_reference(struct block_state *state, uint32_t block,
+                                int is_direct)
+{
+    uint8_t *count = is_direct ? &state->direct_refs[block]
+                               : &state->indirect_refs[block];
+    state->used[block] = 1;
+    if (*count < 2)
+        (*count)++;
+}
+
+static int collect_block_references(const struct image *image,
+                                    struct block_state *state)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode inode = read_inode(image, number);
+        if (inode.type == 0)
+            continue;
+
+        for (size_t i = 0; i < DIRECT_COUNT; i++) {
+            uint32_t block = inode.addresses[i];
+            if (block != 0)
+                add_block_reference(state, block, 1);
+        }
+
+        uint32_t indirect = inode.addresses[DIRECT_COUNT];
+        if (indirect == 0)
+            continue;
+        add_block_reference(state, indirect, 0);
+
+        const uint8_t *entries = image->data + (size_t)indirect * BLOCK_SIZE;
+        for (size_t i = 0; i < INDIRECT_COUNT; i++) {
+            uint32_t block = read_u32(entries + i * sizeof(uint32_t));
+            if (block != 0)
+                add_block_reference(state, block, 0);
+        }
+    }
+    return 0;
+}
+
+static int check_bitmap_for_references(const struct image *image)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode inode = read_inode(image, number);
+        if (inode.type == 0)
+            continue;
+
+        for (size_t i = 0; i < DIRECT_COUNT; i++) {
+            uint32_t block = inode.addresses[i];
+            if (block != 0 && !bitmap_is_set(image, block)) {
+                fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+                return -1;
+            }
+        }
+
+        uint32_t indirect = inode.addresses[DIRECT_COUNT];
+        if (indirect == 0)
+            continue;
+        if (!bitmap_is_set(image, indirect)) {
+            fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+            return -1;
+        }
+
+        const uint8_t *entries = image->data + (size_t)indirect * BLOCK_SIZE;
+        for (size_t i = 0; i < INDIRECT_COUNT; i++) {
+            uint32_t block = read_u32(entries + i * sizeof(uint32_t));
+            if (block != 0 && !bitmap_is_set(image, block)) {
+                fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int check_bitmap_for_unused_blocks(const struct image *image,
+                                          const struct block_state *state)
+{
+    for (uint32_t block = image->data_start; block < image->sb.size; block++) {
+        if (bitmap_is_set(image, block) && !state->used[block]) {
+            fprintf(stderr, "ERROR: bitmap marks block in use but it is not in use.\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int check_duplicate_blocks(const struct image *image,
+                                  const struct block_state *state)
+{
+    for (uint32_t block = image->data_start; block < image->sb.size; block++) {
+        if (state->direct_refs[block] > 1
+            || (state->direct_refs[block] > 0 && state->indirect_refs[block] > 0)) {
+            fprintf(stderr, "ERROR: direct address used more than once.\n");
+            return -1;
+        }
+    }
+    for (uint32_t block = image->data_start; block < image->sb.size; block++) {
+        if (state->indirect_refs[block] > 1) {
+            fprintf(stderr, "ERROR: indirect address used more than once.\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int load_image(struct image *image, const char *path)
 {
     struct stat file_stat;
@@ -269,6 +405,7 @@ static void close_image(struct image *image)
 int main(int argc, char **argv)
 {
     struct image image = { .fd = -1, .data = NULL, .length = 0 };
+    struct block_state blocks = { .used = NULL, .direct_refs = NULL, .indirect_refs = NULL };
 
     if (argc != 2) {
         fprintf(stderr, "Usage: xcheck <file_system_image>\n");
@@ -282,11 +419,23 @@ int main(int argc, char **argv)
 
     if (check_inode_types(&image) < 0
         || check_inode_addresses(&image) < 0
-        || check_root(&image) < 0) {
+        || check_root(&image) < 0
+        || init_block_state(&image, &blocks) < 0) {
+        free_block_state(&blocks);
         close_image(&image);
         return 1;
     }
 
+    collect_block_references(&image, &blocks);
+    if (check_bitmap_for_references(&image) < 0
+        || check_bitmap_for_unused_blocks(&image, &blocks) < 0
+        || check_duplicate_blocks(&image, &blocks) < 0) {
+        free_block_state(&blocks);
+        close_image(&image);
+        return 1;
+    }
+
+    free_block_state(&blocks);
     close_image(&image);
     return 0;
 }
