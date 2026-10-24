@@ -32,10 +32,10 @@
 
 ## Milestone 5 - Complete test coverage and documentation
 
-- [ ] **5.1** Cover all required diagnostics and command-line cases.
-- [ ] **5.2** Check a clean image produced by the pinned xv6 `mkfs`.
-- [ ] **5.3** Record build, test, and compatibility instructions.
-- [ ] **5.4** Run the complete suite and commit the verified project.
+- [x] **5.1** Cover all required diagnostics and command-line cases.
+- [x] **5.2** Check clean and file-containing images from the pinned xv6 `mkfs`.
+- [x] **5.3** Record build, test, and compatibility instructions.
+- [x] **5.4** Run the complete suite and commit the verified project.
 
 ## Milestone 6 - Final review
 

@@ -1,5 +1,6 @@
 #define _FILE_OFFSET_BITS 64
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,6 +33,10 @@
 #define FREE_INODE_REFERENCE "ERROR: inode referred to in directory but marked free."
 #define BAD_FILE_LINKS "ERROR: bad reference count for file."
 #define REPEATED_DIRECTORY "ERROR: directory appears more than once in file system."
+#define FREE_BLOCK_REFERENCE "ERROR: address used by inode but marked free in bitmap."
+#define UNUSED_BITMAP_BLOCK "ERROR: bitmap marks block in use but it is not in use."
+#define REPEATED_DIRECT_ADDRESS "ERROR: direct address used more than once."
+#define REPEATED_INDIRECT_ADDRESS "ERROR: indirect address used more than once."
 
 struct superblock {
     uint32_t size;
@@ -284,7 +289,7 @@ static void add_block_reference(struct block_state *state, uint32_t block,
         (*count)++;
 }
 
-static int collect_block_references(const struct image *image,
+static void collect_block_references(const struct image *image,
                                     struct block_state *state)
 {
     for (uint32_t number = 0; number < image->sb.inode_count; number++) {
@@ -310,7 +315,6 @@ static int collect_block_references(const struct image *image,
                 add_block_reference(state, block, 0);
         }
     }
-    return 0;
 }
 
 static int check_bitmap_for_references(const struct image *image)
@@ -323,7 +327,7 @@ static int check_bitmap_for_references(const struct image *image)
         for (size_t i = 0; i < DIRECT_COUNT; i++) {
             uint32_t block = inode.addresses[i];
             if (block != 0 && !bitmap_is_set(image, block)) {
-                fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+                fprintf(stderr, "%s\n", FREE_BLOCK_REFERENCE);
                 return -1;
             }
         }
@@ -332,7 +336,7 @@ static int check_bitmap_for_references(const struct image *image)
         if (indirect == 0)
             continue;
         if (!bitmap_is_set(image, indirect)) {
-            fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+            fprintf(stderr, "%s\n", FREE_BLOCK_REFERENCE);
             return -1;
         }
 
@@ -340,7 +344,7 @@ static int check_bitmap_for_references(const struct image *image)
         for (size_t i = 0; i < INDIRECT_COUNT; i++) {
             uint32_t block = read_u32(entries + i * sizeof(uint32_t));
             if (block != 0 && !bitmap_is_set(image, block)) {
-                fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+                fprintf(stderr, "%s\n", FREE_BLOCK_REFERENCE);
                 return -1;
             }
         }
@@ -353,7 +357,7 @@ static int check_bitmap_for_unused_blocks(const struct image *image,
 {
     for (uint32_t block = image->data_start; block < image->sb.size; block++) {
         if (bitmap_is_set(image, block) && !state->used[block]) {
-            fprintf(stderr, "ERROR: bitmap marks block in use but it is not in use.\n");
+            fprintf(stderr, "%s\n", UNUSED_BITMAP_BLOCK);
             return -1;
         }
     }
@@ -366,13 +370,13 @@ static int check_duplicate_blocks(const struct image *image,
     for (uint32_t block = image->data_start; block < image->sb.size; block++) {
         if (state->direct_refs[block] > 1
             || (state->direct_refs[block] > 0 && state->indirect_refs[block] > 0)) {
-            fprintf(stderr, "ERROR: direct address used more than once.\n");
+            fprintf(stderr, "%s\n", REPEATED_DIRECT_ADDRESS);
             return -1;
         }
     }
     for (uint32_t block = image->data_start; block < image->sb.size; block++) {
         if (state->indirect_refs[block] > 1) {
-            fprintf(stderr, "ERROR: indirect address used more than once.\n");
+            fprintf(stderr, "%s\n", REPEATED_INDIRECT_ADDRESS);
             return -1;
         }
     }
@@ -481,14 +485,17 @@ static int check_repeated_directory_links(const struct image *image,
 static int load_image(struct image *image, const char *path)
 {
     struct stat file_stat;
-    uint32_t inode_blocks;
-    uint32_t bitmap_blocks;
+    uint64_t inode_blocks;
+    uint64_t bitmap_blocks;
     uint64_t inode_end;
     uint64_t bitmap_end;
 
     image->fd = open(path, O_RDONLY);
     if (image->fd < 0) {
-        fprintf(stderr, "image not found.\n");
+        if (errno == ENOENT || errno == ENOTDIR)
+            fprintf(stderr, "image not found.\n");
+        else
+            perror("xcheck");
         return -1;
     }
 
@@ -524,8 +531,9 @@ static int load_image(struct image *image, const char *path)
     }
 
     image->data_start = image->sb.size - image->sb.data_blocks;
-    inode_blocks = (image->sb.inode_count + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
-    bitmap_blocks = (image->sb.size + BLOCK_BITS - 1) / BLOCK_BITS;
+    inode_blocks = ((uint64_t)image->sb.inode_count + INODES_PER_BLOCK - 1)
+        / INODES_PER_BLOCK;
+    bitmap_blocks = ((uint64_t)image->sb.size + BLOCK_BITS - 1) / BLOCK_BITS;
     inode_end = (uint64_t)image->sb.inode_start + inode_blocks;
     bitmap_end = (uint64_t)image->sb.bitmap_start + bitmap_blocks;
 
