@@ -24,11 +24,11 @@
 
 ## Milestone 4 - Directory and reference checks
 
-- [ ] **4.1** Validate `.` and `..` entries in every directory.
-- [ ] **4.2** Check allocated and referenced inode consistency.
-- [ ] **4.3** Compare regular-file link counts with directory references.
-- [ ] **4.4** Reject directories linked from multiple parents.
-- [ ] **4.5** Test each diagnostic and commit the checks.
+- [x] **4.1** Validate `.` and `..` entries in every directory.
+- [x] **4.2** Check allocated and referenced inode consistency.
+- [x] **4.3** Compare regular-file link counts with directory references.
+- [x] **4.4** Reject directories linked from multiple parents.
+- [x] **4.5** Test each diagnostic and commit the checks.
 
 ## Milestone 5 - Complete test coverage and documentation
 

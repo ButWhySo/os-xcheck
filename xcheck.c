@@ -27,6 +27,11 @@
 #define BAD_DIRECT_ADDRESS "ERROR: bad direct address in inode."
 #define BAD_INDIRECT_ADDRESS "ERROR: bad indirect address in inode."
 #define ROOT_MISSING "ERROR: root directory does not exist."
+#define BAD_DIRECTORY "ERROR: directory not properly formatted."
+#define UNREFERENCED_INODE "ERROR: inode marked use but not found in a directory."
+#define FREE_INODE_REFERENCE "ERROR: inode referred to in directory but marked free."
+#define BAD_FILE_LINKS "ERROR: bad reference count for file."
+#define REPEATED_DIRECTORY "ERROR: directory appears more than once in file system."
 
 struct superblock {
     uint32_t size;
@@ -50,6 +55,11 @@ struct block_state {
     uint8_t *used;
     uint8_t *direct_refs;
     uint8_t *indirect_refs;
+};
+
+struct directory_state {
+    uint32_t *inode_refs;
+    uint32_t *directory_refs;
 };
 
 struct inode {
@@ -200,6 +210,45 @@ static int check_root(const struct image *image)
     return -1;
 }
 
+static int check_directory_format(const struct image *image)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode directory = read_inode(image, number);
+        if (directory.type != TYPE_DIRECTORY)
+            continue;
+        if (directory.size % DIRECTORY_ENTRY_SIZE != 0
+            || directory.size > MAX_FILE_BLOCKS * BLOCK_SIZE) {
+            fprintf(stderr, "%s\n", BAD_DIRECTORY);
+            return -1;
+        }
+
+        unsigned dot_count = 0;
+        unsigned dotdot_count = 0;
+        for (uint32_t offset = 0; offset < directory.size;
+             offset += DIRECTORY_ENTRY_SIZE) {
+            const uint8_t *entry = directory_entry(image, &directory, offset);
+            if (entry == NULL) {
+                fprintf(stderr, "%s\n", BAD_DIRECTORY);
+                return -1;
+            }
+            if (name_is(entry, ".")) {
+                dot_count++;
+                if (read_u16(entry) != number) {
+                    fprintf(stderr, "%s\n", BAD_DIRECTORY);
+                    return -1;
+                }
+            } else if (name_is(entry, "..")) {
+                dotdot_count++;
+            }
+        }
+        if (dot_count != 1 || dotdot_count != 1) {
+            fprintf(stderr, "%s\n", BAD_DIRECTORY);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int init_block_state(const struct image *image, struct block_state *state)
 {
     state->used = calloc(image->sb.size, sizeof(*state->used));
@@ -330,6 +379,105 @@ static int check_duplicate_blocks(const struct image *image,
     return 0;
 }
 
+static int init_directory_state(const struct image *image,
+                                struct directory_state *state)
+{
+    state->inode_refs = calloc(image->sb.inode_count, sizeof(*state->inode_refs));
+    state->directory_refs = calloc(image->sb.inode_count, sizeof(*state->directory_refs));
+    if (state->inode_refs == NULL || state->directory_refs == NULL) {
+        fprintf(stderr, "xcheck: out of memory\n");
+        return -1;
+    }
+    return 0;
+}
+
+static void free_directory_state(struct directory_state *state)
+{
+    free(state->inode_refs);
+    free(state->directory_refs);
+}
+
+static void collect_directory_references(const struct image *image,
+                                         struct directory_state *state)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode directory = read_inode(image, number);
+        if (directory.type != TYPE_DIRECTORY)
+            continue;
+
+        for (uint32_t offset = 0; offset < directory.size;
+             offset += DIRECTORY_ENTRY_SIZE) {
+            const uint8_t *entry = directory_entry(image, &directory, offset);
+            uint32_t target = read_u16(entry);
+            if (target == 0 || target >= image->sb.inode_count)
+                continue;
+            state->inode_refs[target]++;
+            if (!name_is(entry, ".") && !name_is(entry, "..")
+                && read_inode(image, target).type == TYPE_DIRECTORY)
+                state->directory_refs[target]++;
+        }
+    }
+}
+
+static int check_inodes_referenced(const struct image *image,
+                                   const struct directory_state *state)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        if (read_inode(image, number).type != 0 && state->inode_refs[number] == 0) {
+            fprintf(stderr, "%s\n", UNREFERENCED_INODE);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int check_directory_targets(const struct image *image)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode directory = read_inode(image, number);
+        if (directory.type != TYPE_DIRECTORY)
+            continue;
+
+        for (uint32_t offset = 0; offset < directory.size;
+             offset += DIRECTORY_ENTRY_SIZE) {
+            const uint8_t *entry = directory_entry(image, &directory, offset);
+            uint32_t target = read_u16(entry);
+            if (target != 0 && (target >= image->sb.inode_count
+                                || read_inode(image, target).type == 0)) {
+                fprintf(stderr, "%s\n", FREE_INODE_REFERENCE);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int check_file_link_counts(const struct image *image,
+                                  const struct directory_state *state)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        struct inode inode = read_inode(image, number);
+        if (inode.type == TYPE_FILE && inode.links != state->inode_refs[number]) {
+            fprintf(stderr, "%s\n", BAD_FILE_LINKS);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int check_repeated_directory_links(const struct image *image,
+                                          const struct directory_state *state)
+{
+    for (uint32_t number = 0; number < image->sb.inode_count; number++) {
+        if (read_inode(image, number).type == TYPE_DIRECTORY
+            && state->directory_refs[number] > 1) {
+            fprintf(stderr, "%s\n", REPEATED_DIRECTORY);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int load_image(struct image *image, const char *path)
 {
     struct stat file_stat;
@@ -406,6 +554,7 @@ int main(int argc, char **argv)
 {
     struct image image = { .fd = -1, .data = NULL, .length = 0 };
     struct block_state blocks = { .used = NULL, .direct_refs = NULL, .indirect_refs = NULL };
+    struct directory_state directories = { .inode_refs = NULL, .directory_refs = NULL };
 
     if (argc != 2) {
         fprintf(stderr, "Usage: xcheck <file_system_image>\n");
@@ -420,6 +569,7 @@ int main(int argc, char **argv)
     if (check_inode_types(&image) < 0
         || check_inode_addresses(&image) < 0
         || check_root(&image) < 0
+        || check_directory_format(&image) < 0
         || init_block_state(&image, &blocks) < 0) {
         free_block_state(&blocks);
         close_image(&image);
@@ -429,12 +579,25 @@ int main(int argc, char **argv)
     collect_block_references(&image, &blocks);
     if (check_bitmap_for_references(&image) < 0
         || check_bitmap_for_unused_blocks(&image, &blocks) < 0
-        || check_duplicate_blocks(&image, &blocks) < 0) {
+        || check_duplicate_blocks(&image, &blocks) < 0
+        || init_directory_state(&image, &directories) < 0) {
         free_block_state(&blocks);
         close_image(&image);
         return 1;
     }
 
+    collect_directory_references(&image, &directories);
+    if (check_inodes_referenced(&image, &directories) < 0
+        || check_directory_targets(&image) < 0
+        || check_file_link_counts(&image, &directories) < 0
+        || check_repeated_directory_links(&image, &directories) < 0) {
+        free_directory_state(&directories);
+        free_block_state(&blocks);
+        close_image(&image);
+        return 1;
+    }
+
+    free_directory_state(&directories);
     free_block_state(&blocks);
     close_image(&image);
     return 0;

@@ -52,6 +52,20 @@ def set_inode_address(image, number, slot, block):
     struct.pack_into("<I", image, inode_offset(number) + 12 + slot * 4, block)
 
 
+def set_inode_size(image, number, size):
+    struct.pack_into("<I", image, inode_offset(number) + 8, size)
+
+
+def set_inode_links(image, number, links):
+    struct.pack_into("<H", image, inode_offset(number) + 6, links)
+
+
+def write_dirent(image, block, index, number, name):
+    offset = block * BLOCK_SIZE + index * 16
+    struct.pack_into("<H", image, offset, number)
+    image[offset + 2:offset + 16] = name.ljust(14, b"\0")
+
+
 def set_bitmap(image, block, allocated):
     offset = BITMAP_START * BLOCK_SIZE + block // 8
     mask = 1 << (block % 8)
@@ -59,6 +73,26 @@ def set_bitmap(image, block, allocated):
         image[offset] |= mask
     else:
         image[offset] &= ~mask
+
+
+def add_file(image, number=2, links=1):
+    set_inode_type(image, number, 2)
+    set_inode_links(image, number, links)
+    write_dirent(image, ROOT_DATA_BLOCK, 2, number, b"file")
+    set_inode_size(image, 1, 48)
+
+
+def add_child_directory(image, references=1):
+    set_inode_type(image, 2, 1)
+    set_inode_links(image, 2, 1)
+    set_inode_size(image, 2, 32)
+    set_inode_address(image, 2, 0, 61)
+    write_dirent(image, 61, 0, 2, b".")
+    write_dirent(image, 61, 1, 1, b"..")
+    set_bitmap(image, 61, True)
+    for index in range(references):
+        write_dirent(image, ROOT_DATA_BLOCK, 2 + index, 2, b"sub" + str(index).encode())
+    set_inode_size(image, 1, (2 + references) * 16)
 
 
 class XcheckTests(unittest.TestCase):
@@ -231,6 +265,69 @@ class XcheckTests(unittest.TestCase):
 
         path = self.edited_image("duplicate-mixed-address.img", edit)
         self.assert_error(path, "ERROR: direct address used more than once.")
+
+    def test_directory_must_contain_dot(self):
+        path = self.edited_image(
+            "missing-dot.img", lambda image: write_dirent(image, ROOT_DATA_BLOCK, 0, 1, b"x")
+        )
+        self.assert_error(path, "ERROR: directory not properly formatted.")
+
+    def test_dot_must_point_to_its_directory(self):
+        path = self.edited_image(
+            "wrong-dot-target.img", lambda image: write_dirent(image, ROOT_DATA_BLOCK, 0, 2, b".")
+        )
+        self.assert_error(path, "ERROR: directory not properly formatted.")
+
+    def test_subdirectory_must_contain_dotdot(self):
+        def edit(image):
+            set_inode_type(image, 2, 1)
+            set_inode_size(image, 2, 16)
+            set_inode_address(image, 2, 0, 61)
+            write_dirent(image, 61, 0, 2, b".")
+            set_bitmap(image, 61, True)
+            write_dirent(image, ROOT_DATA_BLOCK, 2, 2, b"sub")
+            set_inode_size(image, 1, 48)
+
+        path = self.edited_image("missing-dotdot.img", edit)
+        self.assert_error(path, "ERROR: directory not properly formatted.")
+
+    def test_allocated_inode_must_be_referenced(self):
+        path = self.edited_image("unreferenced-inode.img", lambda image: set_inode_type(image, 2, 2))
+        self.assert_error(path, "ERROR: inode marked use but not found in a directory.")
+
+    def test_directory_cannot_reference_free_inode(self):
+        def edit(image):
+            write_dirent(image, ROOT_DATA_BLOCK, 2, 2, b"free")
+            set_inode_size(image, 1, 48)
+
+        path = self.edited_image("reference-to-free-inode.img", edit)
+        self.assert_error(path, "ERROR: inode referred to in directory but marked free.")
+
+    def test_file_link_count_must_match_directory_entries(self):
+        path = self.edited_image("bad-file-links.img", lambda image: add_file(image, links=2))
+        self.assert_error(path, "ERROR: bad reference count for file.")
+
+    def test_directory_cannot_have_multiple_parent_links(self):
+        path = self.edited_image(
+            "repeated-directory.img", lambda image: add_child_directory(image, references=2)
+        )
+        self.assert_error(path, "ERROR: directory appears more than once in file system.")
+
+    def test_valid_file_and_subdirectory_pass(self):
+        def edit(image):
+            add_file(image)
+            add_child_directory(image)
+            write_dirent(image, ROOT_DATA_BLOCK, 3, 2, b"sub")
+            write_dirent(image, ROOT_DATA_BLOCK, 2, 3, b"file")
+            set_inode_type(image, 3, 2)
+            set_inode_links(image, 3, 1)
+            set_inode_size(image, 1, 64)
+
+        path = self.edited_image("valid-entries.img", edit)
+        result = self.run_xcheck(path)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":
